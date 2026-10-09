@@ -128,7 +128,7 @@ async fn run() -> Result<i32> {
         if hash.len() < 2 {
             continue;
         }
-        let url = format!("{}/{}/{}", game::BMCLAPI.resources_base, &hash[..2], hash);
+        let url = format!("https://resources.download.minecraft.net/{}/{}", &hash[..2], hash);
         let dest = assets_dir.join("objects").join(&hash[..2]).join(hash);
         items.push(DownloadItem { url, dest, sha1: Some(hash.to_string()), fallback_url: None, size: 0 });
     }

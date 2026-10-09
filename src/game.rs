@@ -130,36 +130,9 @@ pub struct AssetIndexContent {
     pub objects: serde_json::Map<String, serde_json::Value>,
 }
 
-/// BMCLAPI 镜像
-pub struct Mirrors {
-    pub version_base: &'static str,
-    pub client_base: &'static str,
-    pub resources_base: &'static str,
-    pub libraries_base: &'static str,
-}
-
-pub const BMCLAPI: Mirrors = Mirrors {
-    version_base: "https://bmclapi2.bangbang93.com",
-    client_base: "https://bmclapi2.bangbang93.com",
-    resources_base: "https://bmclapi2.bangbang93.com/assets",
-    libraries_base: "https://bmclapi2.bangbang93.com/maven",
-};
-
-/// Mojang 官方源 URL 重写为 BMCLAPI 镜像
+/// 下载 URL（当前直接使用官方源）
 pub fn rewrite_url(url: &str) -> String {
-    let official: &[(&str, &str)] = &[
-        ("https://piston-meta.mojang.com", BMCLAPI.version_base),
-        ("https://piston-data.mojang.com", BMCLAPI.client_base),
-        ("https://resources.download.minecraft.net", BMCLAPI.resources_base),
-        ("https://libraries.minecraft.net", BMCLAPI.libraries_base),
-    ];
-    let mut out = url.to_string();
-    for (from, to) in official {
-        if out.starts_with(from) {
-            out = out.replace(from, to);
-        }
-    }
-    out
+    url.to_string()
 }
 
 pub fn rule_allowed(rules: &Option<Vec<Rule>>) -> bool {
@@ -272,10 +245,57 @@ pub fn extract_java(archive: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// 从 Adoptium 下载 JRE 并解压
+/// 清华 TUNA Adoptium 镜像：列出目录并解析最新版压缩包链接
+async fn tuna_java_url(major: u32, os: &str, arch: &str) -> Result<String> {
+    let listing = format!("https://mirrors.tuna.tsinghua.edu.cn/Adoptium/{major}/jdk/{arch}/{os}/");
+    let html = crate::util::http_text(&listing).await?;
+    let suffix = if cfg!(windows) { ".zip\"" } else { ".tar.gz\"" };
+    let mut best: Option<String> = None;
+    for line in html.lines() {
+        if let Some(idx) = line.find("href=\"") {
+            let rest = &line[idx + 6..];
+            if let Some(end) = rest.find('"') {
+                let name = &rest[..end];
+                if name.ends_with(suffix.trim_end_matches('"'))
+                    && name.contains("jdk_")
+                    && name.contains("hotspot")
+                {
+                    if best.as_ref().map_or(true, |b| name > b.as_str()) {
+                        best = Some(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    let name = best.ok_or_else(|| anyhow!("TUNA 镜像未找到 Java {major} 包"))?;
+    Ok(format!("{}{}", listing, name))
+}
+
+/// 从 Adoptium 下载 JRE 并解压（优先国内镜像）
 pub async fn download_java(root: &Path, java_home: &Path, major: u32) -> Result<()> {
     let (os, arch) = crate::paths::adoptium_target();
-    eprintln!("从 Adoptium 下载 Java {major}（{os}/{arch}）…");
+    eprintln!("下载 Java {major}（{os}/{arch}）…");
+    let archive_name = if cfg!(windows) { "java.zip" } else { "java.tar.gz" };
+    let archive = root.join(archive_name);
+
+    // 仅在中国大陆时使用清华 TUNA 镜像
+    if crate::util::is_cn_user().await {
+        match tuna_java_url(major, os, arch).await {
+            Ok(url) => {
+                eprintln!("使用清华 TUNA 镜像…");
+                match parallel_download(vec![DownloadItem { url: url.clone(), dest: archive.clone(), sha1: None, fallback_url: None, size: 0 }]).await {
+                    Ok(()) => {
+                        extract_java(&archive, &java_home)?;
+                        let _ = fs::remove_file(&archive);
+                        return Ok(());
+                    }
+                    Err(e) => eprintln!("镜像下载失败（{e}），回退 Adoptium 官方源…"),
+                }
+            }
+            Err(e) => eprintln!("获取镜像信息失败（{e}），回退 Adoptium 官方源…"),
+        }
+    }
+
     let api = format!(
         "https://api.adoptium.net/v3/assets/latest/{major}/hotspot?os={os}&architecture={arch}&image_type=jdk"
     );
@@ -290,8 +310,6 @@ pub async fn download_java(root: &Path, java_home: &Path, major: u32) -> Result<
         .pointer("/binary/package/size")
         .and_then(|s| s.as_u64())
         .unwrap_or(0);
-    let archive_name = if cfg!(windows) { "java.zip" } else { "java.tar.gz" };
-    let archive = root.join(archive_name);
     parallel_download(vec![DownloadItem { url: pkg, dest: archive.clone(), sha1: None, fallback_url: None, size: pkg_size }]).await?;
     extract_java(&archive, &java_home)?;
     let _ = fs::remove_file(&archive);
