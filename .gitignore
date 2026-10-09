@@ -2,8 +2,13 @@
 **/*.rs.bk
 *.pdb
 
+# 旧版工作目录（已迁移为 instances/）
 /mc/
+
+# 实例数据（版本、库、资源、Java 运行时、存档等），每个实例独立隔离
+/instances/
 java.zip
+java.tar.gz
 *.log
 hs_err_pid*
 replay_pid*
